@@ -1,0 +1,15 @@
+# R session / history
+.RData
+.RData*
+.Rhistory
+.Rproj.user/
+*.Rproj
+
+# Results / large outputs
+*.RDS
+*.rds
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.claude/
