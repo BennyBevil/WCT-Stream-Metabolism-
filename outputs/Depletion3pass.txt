@@ -1,0 +1,15 @@
+
+model {
+  lqm  ~ dunif(-3, 3)
+  lqsd ~ dnorm(0, 3) T(0,)
+  for(s in 1:Nstream) {
+    lq[s] ~ dnorm(lqm, pow(lqsd, -2))
+    q[s]  <- ilogit(lq[s])
+    Np[s] ~ dpois(N[s])
+    N[s]  ~ dunif(minN[s], 5000)
+    catch[s,1] ~ dbin(q[s], Np[s])
+    catch[s,2] ~ dbin(q[s], Np[s] - catch[s,1])
+    catch[s,3] ~ dbin(q[s], Np[s] - catch[s,1] - catch[s,2])
+  }
+}
+

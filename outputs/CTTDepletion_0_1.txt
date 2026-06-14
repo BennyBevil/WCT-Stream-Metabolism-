@@ -1,0 +1,14 @@
+
+model {
+    catch[1] ~ dbin(q,Np);
+    
+    Np ~ dpois(N);
+    
+    for(k in 2:Npass){
+       catch[k] ~ dbin(q,(Np-sum(catch[1:(k-1)])));
+    }
+    
+    q ~ dunif(0,1);
+    N ~ dunif(minN,3000)
+}
+

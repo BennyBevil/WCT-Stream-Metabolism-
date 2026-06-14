@@ -1,0 +1,10 @@
+
+model {
+  for(s in 1:Nstream) {
+    C_obs[s] ~ dnorm(mu[s], pow(sigma_C[s], -2))
+    mu[s] <- alpha + beta_GPP * GPP_z[s]
+  }
+  alpha    ~ dnorm(0, 0.01)
+  beta_GPP ~ dnorm(0, 0.01) T(0,)
+}
+

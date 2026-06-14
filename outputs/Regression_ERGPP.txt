@@ -1,0 +1,15 @@
+
+model {
+  for(s in 1:Nstream) {
+    P_obs[s] ~ dnorm(mu[s], pow(sigma_P[s], -2))
+    mu[s] <- beta0 +
+             beta_GPP   * GPP_z[s]   +
+             beta_ERGPP * ERGPP_z[s] +
+             beta_T     * Temp_z[s]
+  }
+  beta0      ~ dnorm(0, 0.01)
+  beta_GPP   ~ dnorm(0, 0.01)
+  beta_ERGPP ~ dnorm(0, 0.01)
+  beta_T     ~ dnorm(0, 0.01)
+}
+

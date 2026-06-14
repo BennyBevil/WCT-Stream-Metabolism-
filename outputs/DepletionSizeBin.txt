@@ -1,0 +1,26 @@
+
+model {
+  b_FL    ~ dnorm(0, 1)
+  sigma_a ~ dnorm(0, pow(0.1, -2)) T(0,)   # half-normal; deviation from simple-model anchor
+
+  for (s in 1:Nstream) {
+    a[s] ~ dnorm(a_prior[s], pow(sigma_a, -2))
+
+    for (b in 1:Nbin) {
+      # cenFL centres the regression so a[s] = logit(q) at mean log(FL),
+      # not at FL=1mm; this is purely computational (improves MCMC mixing)
+      # and does not change the biological interpretation.
+      # q_min provides a floor: even the smallest fish are detected at
+      # some non-negligible rate, preventing q -> 0 and unbounded N.
+      lq[s,b] <- a[s] + b_FL * (logFL_mid[b] - cenFL)
+      q[s,b]  <- q_min + (1 - q_min) * ilogit(lq[s,b])
+
+      N[s,b]  ~ dunif(minN[s,b], maxN)
+      Np[s,b] ~ dpois(N[s,b])
+
+      catch[s,b,1] ~ dbin(q[s,b], Np[s,b])
+      catch[s,b,2] ~ dbin(q[s,b], Np[s,b] - catch[s,b,1])
+      catch[s,b,3] ~ dbin(q[s,b], Np[s,b] - catch[s,b,1] - catch[s,b,2])
+    }
+  }
+}
