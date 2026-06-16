@@ -3,17 +3,23 @@
 # Fish Bioenergetics 4.0 (Deslauriers et al. 2017, fb4package)
 # Aug–Oct 2025, 8 isolated streams
 #
-# Runs a separate fb4 simulation for every Dep1 fish with a measured weight
+# Runs a separate fb4 simulation for every Dep1 fish with measured FL
 # (n = 829), producing a per-fish distribution of consumption and respiration.
 #
-# Final weight (W_final) source per fish:
-#   empirical    — PIT-tag recaptures with W measured at Dep2 (n = 153)
-#   growth_model — growth model (ΔFL ~ log(FL_aug) + (1|Location)) + L-W
-#                  applied to remaining 676 non-recaptured fish
+# Growth and length-weight models are fit once in 02_Growth.R (single source
+# of truth) and reused here so bioenergetics and 04_Production.R stay
+# consistent. The per-day log(dFL) growth model (PIT-tag recaptures) is applied
+# uniformly to every Dep1 fish to predict its trajectory, then the hierarchical
+# L-W model (stream RE + occasion FE) maps length to weight at each occasion:
+#   dFL_day   = exp(b0 + u_stream + b1*log(FL_aug) + sigma^2/2)   [mm day-1]
+#   FL_oct    = FL_aug + dFL_day * n_days
+#   W_initial = pred_W(FL_aug, stream, "dep1")   Aug L-W relationship
+#   W_final   = pred_W(FL_oct, stream, "dep2")   Oct L-W relationship
 #
 # Species: Oncorhynchus clarki (WCT) from fish4_parameters; falls back to RBT.
-# Diet: 100% aquatic invertebrate, 2500 cal g-1 wet mass (KEY ASSUMPTION).
-# oxycal: 14100 J g-1 O2 (= 14.1 kJ g-1; consistent with Production.R).
+# Diet: 100% aquatic invertebrate, 2500 cal g-1 = 10460 J g-1 wet mass (KEY ASSUMPTION).
+# oxycal: 14100 J g-1 O2 — passed to run_fb4(); daily_output columns are in
+#          J/day (already converted), so post-processing uses /1000 for kJ.
 #
 # Outputs: bioenergetics_results.RDS
 #   fish_bioen  — per-fish data frame: W_initial, W_final, p_value,
@@ -79,42 +85,18 @@ dep1    <- dat %>% filter(Depletion == 1)
 dep2    <- dat %>% filter(Depletion == 2)
 
 # ============================================================
-# 3. Length-weight model (for W_final of non-recaptured fish)
+# 3. Growth & length-weight models (centralised in 02_Growth.R)
 # ============================================================
+# Single source of truth: 02_Growth.R fits the hierarchical L-W model
+# (stream RE + occasion fixed effect) and the per-day log(dFL) growth model and
+# saves them to growth_results.RDS. Reusing them here guarantees that the
+# length->weight mapping and growth projection match 04_Production.R exactly.
 
-lw_dat <- dat %>% filter(!is.na(W), !is.na(FL), W > 0, FL > 0)
-lw_mod <- lm(log(W) ~ log(FL), data = lw_dat)
-lw_a   <- coef(lw_mod)[1]
-lw_b   <- coef(lw_mod)[2]
-pred_W <- function(FL) exp(lw_a + lw_b * log(FL))
-
-# ============================================================
-# 4. Growth model (for W_final of non-recaptured fish)
-# ============================================================
-
-tagged_d1 <- dep1 %>%
-  filter(!is.na(Tag), Tag != "") %>%
-  select(Tag, Location, FL_aug = FL, Date_aug = Date)
-
-recaps_d2 <- dep2 %>%
-  filter(Recap == 1) %>%
-  select(Tag, Location, FL_oct = FL, Date_oct = Date)
-
-growth_dat <- tagged_d1 %>%
-  inner_join(recaps_d2, by = c("Tag", "Location")) %>%
-  mutate(dFL = FL_oct - FL_aug) %>%
-  filter(!is.na(dFL), !is.na(FL_aug), FL_aug > 0) %>%
-  mutate(logFL_aug = log(FL_aug))
-
-growth_mod <- lmer(dFL ~ logFL_aug + (1 | Location),
-                   data = growth_dat, REML = TRUE)
-fe    <- fixef(growth_mod)
-re_df <- ranef(growth_mod)$Location
-
-stream_re <- setNames(
-  sapply(streams, function(s) if (s %in% rownames(re_df)) re_df[s, 1] else 0),
-  streams
-)
+grw          <- readRDS("growth_results.RDS")
+pred_W       <- grw$pred_W        # pred_W(FL, stream, occasion = "dep1"/"dep2") -> g
+fe_FL        <- grw$fe_FL         # per-day log(dFL) fixed effects: (Intercept), logFL_aug
+sigma_FL     <- grw$sigma_FL      # residual SD on log scale (log mm day-1)
+stream_re_FL <- grw$stream_re_FL  # named vector: stream random intercepts
 
 # ============================================================
 # 5. Production interval dates per stream
@@ -164,43 +146,39 @@ stream_temp_dfs <- lapply(setNames(streams, streams), function(s) {
 # ============================================================
 # 7. Build per-fish dataset
 # ============================================================
-# W_final: empirical for PIT-tag recaptures; growth model + L-W otherwise.
-
-recaps_w <- dep2 %>%
-  filter(Recap == 1, !is.na(W), W > 0) %>%
-  select(Tag, Location, W_oct = W) %>%
-  distinct(Tag, Location, .keep_all = TRUE)   # keep one recapture per fish
+# Growth model applied to every Dep1 fish — recaptures inform the model
+# but are not used as individual endpoints here.
 
 fish_all <- dep1 %>%
-  filter(!is.na(W), W > 0, !is.na(FL), FL > 0) %>%
-  select(Tag, Location, FL_aug = FL, W_aug = W) %>%
-  mutate(fish_id = row_number()) %>%
-  left_join(recaps_w, by = c("Tag", "Location")) %>%
-  mutate(
-    stream_re_val = stream_re[Location],
-    mu_dFL        = fe["(Intercept)"] + stream_re_val +
-                    fe["logFL_aug"] * log(FL_aug),
-    FL_oct_pred   = pmax(FL_aug + mu_dFL, 1),
-    W_final_pred  = pred_W(FL_oct_pred),
-    W_final       = ifelse(!is.na(W_oct), W_oct, W_final_pred),
-    W_final_source = ifelse(!is.na(W_oct), "empirical", "growth_model")
-  ) %>%
+  filter(!is.na(FL), FL > 0) %>%
+  select(Tag, Location, FL_aug = FL, W_aug = W) %>%   # W_aug retained for reference
   left_join(interval_days %>% select(Stream, n_days = days),
-            by = c("Location" = "Stream"))
+            by = c("Location" = "Stream")) %>%
+  mutate(
+    fish_id   = row_number(),
+    re_FL     = coalesce(unname(stream_re_FL[Location]), 0),
+    dFL_day   = exp(fe_FL["(Intercept)"] + re_FL +
+                    fe_FL["logFL_aug"] * log(FL_aug) + sigma_FL^2 / 2),  # mm day-1
+    FL_oct    = pmax(FL_aug + dFL_day * n_days, 1),
+    W_initial = pred_W(FL_aug, Location, "dep1"),   # Aug L-W relationship
+    W_final   = pred_W(FL_oct, Location, "dep2")    # Oct L-W relationship
+  )
 
 cat("\n--- Fish dataset summary ---\n")
 cat("Total fish:", nrow(fish_all), "\n")
 fish_all %>%
-  count(Location, W_final_source) %>%
-  pivot_wider(names_from = W_final_source, values_from = n, values_fill = 0) %>%
+  group_by(Location) %>%
+  summarise(n = n(), mean_W_initial = round(mean(W_initial), 1),
+            mean_W_final = round(mean(W_final), 1), .groups = "drop") %>%
   print()
 
 # ============================================================
 # 8. Per-fish fb4 simulations
 # ============================================================
 
-OXYCAL_J        <- 14100   # J g-1 O2
-PREY_ENERGY_CAL <- 2500    # cal g-1 wet mass; KEY ASSUMPTION
+OXYCAL_J       <- 14100   # J g-1 O2
+PREY_ENERGY_J  <- 2500 * 4.184   # J g-1 wet mass (2500 cal g-1 × 4.184 J cal-1)
+                                  # fb4package expects J g-1 throughout
 
 results_list <- vector("list", nrow(fish_all))
 
@@ -219,13 +197,13 @@ for (i in seq_len(nrow(fish_all))) {
   }
 
   diet_prop   <- data.frame(Day = seq_len(n_days), invertebrate = 1.0)
-  prey_energy <- data.frame(Day = seq_len(n_days), invertebrate = PREY_ENERGY_CAL)
+  prey_energy <- data.frame(Day = seq_len(n_days), invertebrate = PREY_ENERGY_J)
 
   bio_obj <- Bioenergetic(species_params = sp_params, species_info = sp_info)
   bio_obj <- set_environment(bio_obj,        temperature_data = t_df)
   bio_obj <- set_diet(bio_obj,               diet_proportions = diet_prop,
                                               prey_energies    = prey_energy)
-  bio_obj <- set_simulation_settings(bio_obj, initial_weight  = fish_i$W_aug,
+  bio_obj <- set_simulation_settings(bio_obj, initial_weight  = fish_i$W_initial,
                                                duration        = n_days)
 
   res_i <- tryCatch(
@@ -244,7 +222,7 @@ for (i in seq_len(nrow(fish_all))) {
       fish_id        = fish_i$fish_id,
       p_value        = res_i$summary$p_value,
       converged      = res_i$summary$converged,
-      cum_resp_kJ    = sum(daily$Respiration,       na.rm = TRUE) / 1000,
+      cum_resp_kJ    = sum(daily$Respiration,        na.rm = TRUE) / 1000,
       cum_cons_kJ    = sum(daily$Consumption_energy, na.rm = TRUE) / 1000,
       cum_growth_kJ  = sum(daily$Net_energy,         na.rm = TRUE) / 1000
     )
@@ -262,7 +240,7 @@ cat("  Done.\n\n")
 res_df <- bind_rows(lapply(results_list, as.data.frame))
 
 fish_bioen <- fish_all %>%
-  select(fish_id, Location, FL_aug, W_aug, W_final, W_final_source, n_days) %>%
+  select(fish_id, Location, FL_aug, W_aug, W_initial, FL_oct, W_final, n_days) %>%
   left_join(res_df, by = "fish_id") %>%
   rename(Stream = Location)
 
@@ -274,7 +252,6 @@ fish_bioen %>%
   group_by(Stream) %>%
   summarise(
     n           = n(),
-    n_empirical = sum(W_final_source == "empirical"),
     p_median    = round(median(p_value,     na.rm = TRUE), 3),
     p_lo95      = round(quantile(p_value,   0.025, na.rm = TRUE), 3),
     p_hi95      = round(quantile(p_value,   0.975, na.rm = TRUE), 3),
@@ -314,12 +291,12 @@ saveRDS(list(
   prod_dates      = prod_dates,
   daily_temp_prod = daily_temp_prod,
   interval_days   = interval_days,
-  # Supporting models (reused downstream)
-  lw_mod          = lw_mod,
-  growth_mod      = growth_mod,
+  # Supporting models (centralised in 02_Growth.R; kept here for provenance)
+  lw_mod          = grw$lw_mod,
+  growth_mod      = grw$growth_mod_FL,
   # Constants
-  OXYCAL_J        = OXYCAL_J,
-  PREY_ENERGY_CAL = PREY_ENERGY_CAL
+  OXYCAL_J      = OXYCAL_J,
+  PREY_ENERGY_J = PREY_ENERGY_J
 ), "bioenergetics_results.RDS")
 
 cat("\nDone. Results saved to bioenergetics_results.RDS\n")

@@ -1,0 +1,11 @@
+
+model {
+  for(s in 1:Nstream) {
+    y_obs[s] ~ dnorm(mu[s], pow(sigma_y[s], -2))
+    mu[s] <- beta0 + beta_T * Temp_z[s] + beta_T2 * pow(Temp_z[s], 2)
+  }
+  beta0   ~ dnorm(0, 0.01)
+  beta_T  ~ dnorm(0, 0.01)
+  beta_T2 ~ dnorm(0, 0.01)
+}
+

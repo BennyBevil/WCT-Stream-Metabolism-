@@ -13,3 +13,27 @@
 .DS_Store
 Thumbs.db
 .claude/
+
+# Compiled ADMB / build artifacts (BAMM engine)
+*.obj
+*.o
+*.exe
+*.log
+*.bar
+*.cor
+*.eva
+*.std
+*.par
+*.rep
+*.htp
+*.b0[0-9]
+*.p0[0-9]
+*.r0[0-9]
+BAMM/BaMM
+BAMM/build_bounded/BaMM
+BAMM/engine_*/BaMM
+BAMM/archive/
+
+# Large MCMC chain dumps (regenerable, exceed GitHub size limits)
+BaMM_mcmc.dat
+*.docx

@@ -1,0 +1,27 @@
+
+model {
+
+    for(s in 1:Nstream){
+      catch[s,1] ~ dbin(q[s],Np[s]);
+      for(k in 2:Npass[s]){
+        catch[s,k] ~ dbin(q[s],(Np[s]-sum(catch[s,(1:(k-1))])));
+      }
+    }
+    
+    lqm ~ dunif(-3,3);
+    lqsd ~ dnorm(0,3) T(0,);
+    for(s in 1:Nstream){
+      Np[s] ~ dpois(N[s]);
+      N[s] ~ dunif(minN[s],10000);
+      lq[s] ~ dnorm(lqm,pow(lqsd,-2));
+      q[s] <- exp(lq[s])/(1+exp(lq[s]));
+      
+      Biomass[s] <- Np[s] * AvgW[s];
+      NDens[s] <- Np[s]/(SectionLength[s]*StreamWidth[s]);
+      BDens[s] <- Biomass[s]/(SectionLength[s]*StreamWidth[s]);
+    }
+    
+    
+    
+  
+}  

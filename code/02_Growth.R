@@ -3,8 +3,10 @@
 # Aug–Oct 2025, 8 isolated streams
 #
 # Models:
-#   L-W:     log(W) ~ log(FL)  on all fish with measured W and FL
-#            W (g) = exp(lw_a) * FL^lw_b
+#   L-W:     log(W) ~ log(FL) + occasion + (1 | Location)  — hierarchical
+#            Common allometric slope; occasion (Dep1/Dep2) FIXED-effect
+#            intercept shift (Aug vs Oct condition); stream random intercept.
+#            W (g) = exp(b0 + b1*log(FL) + b_occ*[occ==dep2] + u_stream)
 #   Growth:  dFL_day ~ log(FL_aug) + (1 | Location)  — mm day-1
 #            dW_day  ~ log(W_aug)  + (1 | Location)  — g day-1
 #   Both fit by REML on PIT-tagged Dep1 fish recaptured at Dep2.
@@ -41,17 +43,61 @@ dep1 <- dat %>% filter(Depletion == 1)
 dep2 <- dat %>% filter(Depletion == 2)
 
 # ============================================================
-# 2. Length-weight model
+# 2. Length-weight model (hierarchical)
 # ============================================================
-# Fit log-log OLS on all fish with both W and FL recorded.
-# W (g) = exp(lw_a) * FL^lw_b
+# Fit on all fish with both W and FL recorded.
+#   log(W) = b0 + b1*log(FL) + b_occ*[occasion==dep2] + u_stream
+# - Common allometric slope b1 across streams/occasions.
+# - occasion (Dep1 Aug vs Dep2 Oct) enters as a FIXED-effect intercept shift:
+#   a 2-level grouping factor cannot support a reliable variance component,
+#   so a random effect would be near-singular. The fixed effect still gives a
+#   distinct Aug vs Oct relationship (occasion-accurate predicted weight).
+# - Stream (8 levels) is a random intercept.
 
-lw_dat <- dat %>% filter(!is.na(W), !is.na(FL), W > 0, FL > 0)
-lw_mod <- lm(log(W) ~ log(FL), data = lw_dat)
-lw_a   <- coef(lw_mod)[1]
-lw_b   <- coef(lw_mod)[2]
+lw_dat <- dat %>%
+  filter(!is.na(W), !is.na(FL), W > 0, FL > 0) %>%
+  mutate(
+    occasion = factor(if_else(Depletion == 1, "dep1", "dep2"),
+                      levels = c("dep1", "dep2")),
+    logFL    = log(FL)
+  )
 
-cat("\n--- Length-weight model ---\n")
+lw_mod <- lmer(log(W) ~ logFL + occasion + (1 | Location),
+               data = lw_dat, REML = TRUE)
+
+lw_fe    <- fixef(lw_mod)
+lw_sigma <- sigma(lw_mod)
+lw_re    <- ranef(lw_mod)$Location
+lw_stream_re <- setNames(
+  sapply(streams, function(s) if (s %in% rownames(lw_re)) lw_re[s, 1] else 0),
+  streams
+)
+
+# Back-compat population-average scalars (dep1 reference, stream mean RE = 0).
+# Used by 05_Growth_Uncertainty.R for its chain-rule sensitivity calc.
+lw_a <- unname(lw_fe["(Intercept)"])
+lw_b <- unname(lw_fe["logFL"])
+
+# Portable occasion- and stream-aware predictor (median weight, g).
+# Closes over fixed effects + stream REs only, so it serialises cleanly with
+# growth_results.RDS; 03_Bioenergetics.R and 04_Production.R both call this so
+# weights are guaranteed consistent across the pipeline.
+pred_W <- local({
+  b0  <- unname(lw_fe["(Intercept)"])
+  b1  <- unname(lw_fe["logFL"])
+  bo2 <- {
+    nm <- grep("^occasion", names(lw_fe), value = TRUE)
+    if (length(nm)) unname(lw_fe[nm[1]]) else 0
+  }
+  sre <- lw_stream_re
+  function(FL, stream, occasion = "dep1") {
+    re <- unname(sre[as.character(stream)]); re[is.na(re)] <- 0
+    oc <- ifelse(as.character(occasion) == "dep2", bo2, 0)
+    exp(b0 + b1 * log(FL) + oc + re)
+  }
+})
+
+cat("\n--- Length-weight model (hierarchical: stream RE + occasion FE) ---\n")
 print(summary(lw_mod))
 
 # ============================================================
@@ -437,13 +483,19 @@ p_mod_W <- ggplot(growth_dat_W,
   theme_bw(base_size = 11) +
   theme(legend.position = "right")
 
-p_lw <- ggplot(lw_dat, aes(x = log(FL), y = log(W))) +
+lw_occ_shift <- { nm <- grep("^occasion", names(lw_fe), value = TRUE)
+                  if (length(nm)) unname(lw_fe[nm[1]]) else 0 }
+p_lw <- ggplot(lw_dat, aes(x = log(FL), y = log(W), colour = occasion)) +
   geom_point(alpha = 0.4, size = 1.5) +
-  geom_smooth(method = "lm", colour = "steelblue", se = TRUE) +
+  geom_smooth(method = "lm", se = TRUE) +
+  scale_colour_manual(values = c(dep1 = "tomato", dep2 = "steelblue")) +
   labs(
     x = "log(Fork length, mm)",
     y = "log(Weight, g)",
-    title = sprintf("Length-weight: log(W) = %.3f + %.3f \u00D7 log(FL)", lw_a, lw_b)
+    colour = "Occasion",
+    title = sprintf(
+      "Length-weight (hierarchical): log(W) = %.3f + %.3f \u00D7 log(FL); Dep2 shift = %.3f",
+      lw_a, lw_b, lw_occ_shift)
   ) +
   theme_bw(base_size = 11)
 
@@ -463,9 +515,13 @@ print(p_mod_W)
 # ============================================================
 
 saveRDS(list(
-  # Length-weight
+  # Length-weight (hierarchical: stream RE + occasion FE)
   lw_mod       = lw_mod,
-  lw_a         = lw_a,
+  lw_fe        = lw_fe,
+  lw_sigma     = lw_sigma,
+  lw_stream_re = lw_stream_re,
+  pred_W       = pred_W,      # pred_W(FL, stream, occasion = "dep1"/"dep2") -> g
+  lw_a         = lw_a,        # back-compat scalars (population-average, dep1)
   lw_b         = lw_b,
   # dFL model (mm day-1)
   growth_mod_FL = growth_mod_FL,
